@@ -220,6 +220,7 @@ async def triage_email(data: EmailPayload, db: Session = Depends(get_db)):
     }
 
 
+@app.get("/api/dashboard/emails")
 @app.get("/api/emails")
 def get_emails(
     priority: Optional[str] = None,
@@ -368,6 +369,7 @@ async def handle_missed_call(data: MissedCallPayload, db: Session = Depends(get_
     }
 
 
+@app.get("/api/dashboard/calls")
 @app.get("/api/missed-calls")
 def get_missed_calls(
     limit: int = Query(default=50, le=200),
