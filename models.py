@@ -8,6 +8,7 @@ class EmailTriageRecord(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     email_id = Column(String(255), unique=True, index=True, nullable=False)
+    account_email = Column(String(255), nullable=True, index=True)
     sender = Column(String(255), nullable=False)
     subject = Column(String(500), nullable=False)
     snippet = Column(Text, nullable=True)

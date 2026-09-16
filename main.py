@@ -62,6 +62,8 @@ class EmailPayload(BaseModel):
     subject: Optional[str] = "(No Subject)"
     snippet: Optional[str] = ""
     body: Optional[str] = None
+    account_email: Optional[str] = None
+
 
 
 class EmailStatusUpdate(BaseModel):
@@ -187,6 +189,7 @@ async def triage_email(data: EmailPayload, db: Session = Depends(get_db)):
     # 3. Persist to Neon PostgreSQL
     new_email = EmailTriageRecord(
         email_id=data.id,
+        account_email=data.account_email,
         sender=data.sender,
         subject=data.subject or "(No Subject)",
         snippet=data.snippet or "",
@@ -204,6 +207,7 @@ async def triage_email(data: EmailPayload, db: Session = Depends(get_db)):
     return {
         "id": new_email.id,
         "email_id": new_email.email_id,
+        "account_email": new_email.account_email,
         "sender": new_email.sender,
         "subject": new_email.subject,
         "priority": new_email.priority,
@@ -245,6 +249,7 @@ def get_emails(
             {
                 "id": r.id,
                 "email_id": r.email_id,
+                "account_email": r.account_email,
                 "sender": r.sender,
                 "subject": r.subject,
                 "snippet": r.snippet,
@@ -410,14 +415,48 @@ def get_stats(db: Session = Depends(get_db)):
     """Summary metrics for mobile app or admin dashboard."""
     total_emails = db.query(EmailTriageRecord).count()
     urgent_emails = db.query(EmailTriageRecord).filter(EmailTriageRecord.priority == "URGENT").count()
+    important_emails = db.query(EmailTriageRecord).filter(EmailTriageRecord.priority == "IMPORTANT").count()
+    low_emails = db.query(EmailTriageRecord).filter(EmailTriageRecord.priority == "LOW").count()
     action_required_emails = db.query(EmailTriageRecord).filter(EmailTriageRecord.action_required == True).count()
     new_emails = db.query(EmailTriageRecord).filter(EmailTriageRecord.status == "NEW").count()
     total_missed_calls = db.query(MissedCallRecord).count()
 
+    latest_tracked = (
+        db.query(EmailTriageRecord)
+        .filter(EmailTriageRecord.account_email.isnot(None))
+        .order_by(desc(EmailTriageRecord.created_at))
+        .first()
+    )
+    monitored_account = latest_tracked.account_email if latest_tracked else None
+
     return {
+        "monitored_account": monitored_account,
         "total_emails": total_emails,
         "urgent_emails": urgent_emails,
+        "important_emails": important_emails,
+        "low_emails": low_emails,
         "action_required_emails": action_required_emails,
         "new_emails": new_emails,
         "total_missed_calls": total_missed_calls
     }
+
+
+@app.post("/api/seed-sample-email")
+def seed_sample_email(db: Session = Depends(get_db)):
+    """Convenience endpoint to inject realistic demo emails for UI preview."""
+    sample = EmailTriageRecord(
+        email_id=f"demo-urgent-{datetime.utcnow().strftime('%M%S')}",
+        account_email="mymailbox@gmail.com",
+        sender="Alex Rivera <alex.rivera@techcorp.io>",
+        subject="URGENT: Server migration & DNS cutover scheduled tonight",
+        snippet="Please confirm DNS propagation approval before 9 PM EST. Downtime window is 15 minutes.",
+        priority="URGENT",
+        summary="Urgent approval needed for tonight's server migration and DNS cutover before 9 PM EST.",
+        action_required=True,
+        suggested_reply="Hi Alex, I have reviewed the migration schedule and give full approval for the 9 PM EST cutover window.",
+        status="NEW"
+    )
+    db.add(sample)
+    db.commit()
+    db.refresh(sample)
+    return {"message": "Sample urgent email seeded successfully!", "id": sample.id}
