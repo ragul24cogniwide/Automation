@@ -1,0 +1,13 @@
+services:
+  agent-api:
+    build: .
+    container_name: personal_agent_backend
+    restart: unless-stopped
+    ports:
+      - "8006:8006"
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+    environment:
+      - PORT=8006
