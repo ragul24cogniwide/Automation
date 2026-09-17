@@ -369,21 +369,25 @@ async def handle_missed_call(data: MissedCallPayload, db: Session = Depends(get_
     """
     call_type = (data.call_type or "MISSED").upper()
 
+    has_name = bool(data.caller_name and data.caller_name.strip() and data.caller_name.strip().lower() != "unknown")
+    greeting_prefix = f"Hi {data.caller_name.strip()}," if has_name else "Hi,"
+
     if call_type == "DECLINED":
         system_prompt = (
-            "You are an executive personal assistant. Generate a polite, concise SMS auto-reply "
-            "for an incoming phone call that I had to decline/cut because I am busy or in a meeting. "
-            "Rules: Under 140 characters. Briefly apologize for having to decline the call, mention currently occupied/in a meeting, "
-            "and invite them to text what they need. Return ONLY the exact text string to send without quotation marks."
+            "You are Ragul's personal AI executive assistant. Generate a polite, concise SMS auto-reply "
+            "for an incoming phone call that Ragul had to decline/cut because he is busy. "
+            f"Mandatory structure: '{greeting_prefix} Ragul is unable to attend the call right now. Please feel free to say the purpose of the call, I will catch you soon.' "
+            "Rules: Under 140 characters. Return ONLY the exact text string to send without quotation marks."
         )
-        default_reply = "Hi! Sorry I had to decline your call, I'm currently occupied. Please text me what you need and I'll get back to you shortly."
+        default_reply = f"{greeting_prefix} Ragul is unable to attend the call right now. Please feel free to say the purpose of the call, I will catch you soon."
     else:
         system_prompt = (
-            "You are an executive personal assistant. Generate a polite, concise SMS auto-reply for a missed phone call. "
-            "Rules: Under 140 characters. Mention I missed their call, am currently occupied, and ask them to text if it is urgent. "
-            "Return ONLY the exact text string to send without quotation marks."
+            "You are Ragul's personal AI executive assistant. Generate a polite, concise SMS auto-reply "
+            "for a missed phone call. "
+            f"Mandatory structure: '{greeting_prefix} Ragul is unable to attend the call. Please feel free to say the purpose of the call, I will catch you soon.' "
+            "Rules: Under 140 characters. Return ONLY the exact text string to send without quotation marks."
         )
-        default_reply = "Hi! I missed your call. I am currently occupied—please text me if it's urgent, and I'll get back to you shortly."
+        default_reply = f"{greeting_prefix} Ragul is unable to attend the call. Please feel free to say the purpose of the call, I will catch you soon."
 
     sms_reply = default_reply
 
