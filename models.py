@@ -28,6 +28,7 @@ class MissedCallRecord(Base):
     id = Column(Integer, primary_key=True, index=True)
     caller_number = Column(String(50), index=True, nullable=False)
     caller_name = Column(String(255), default="Unknown")
+    call_type = Column(String(50), default="MISSED")  # MISSED, DECLINED
     missed_at = Column(String(100), nullable=True)
     sms_reply = Column(Text, nullable=True)
     status = Column(String(50), default="GENERATED", index=True)  # GENERATED, SENT, FAILED

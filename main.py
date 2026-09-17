@@ -46,6 +46,9 @@ async def lifespan(app: FastAPI):
     # Initialize database tables on server startup
     try:
         init_db()
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE missed_calls ADD COLUMN IF NOT EXISTS call_type VARCHAR(50) DEFAULT 'MISSED';"))
+            conn.commit()
         print("Neon PostgreSQL tables verified successfully.")
     except Exception as e:
         print(f"Database initialization warning: {e}")
@@ -89,6 +92,7 @@ class MissedCallPayload(BaseModel):
     caller_number: str
     caller_name: Optional[str] = "Unknown"
     missed_at: Optional[str] = "Just now"
+    call_type: Optional[str] = "MISSED"  # MISSED or DECLINED
 
 
 class MissedCallStatusUpdate(BaseModel):
@@ -360,22 +364,28 @@ def update_email_status(email_id: str, payload: EmailStatusUpdate, db: Session =
 @app.post("/api/missed-call")
 async def handle_missed_call(data: MissedCallPayload, db: Session = Depends(get_db)):
     """
-    Handles a missed call event, generates an SMS response via Gemini,
+    Handles a missed or cut/declined call event, generates a carrier SMS response via DeepSeek,
     and logs the call into Neon PostgreSQL.
     """
-    prompt = f"""
-    Generate a polite, concise SMS auto-reply for a missed call.
-    Caller Name: {data.caller_name}
-    Caller Number: {data.caller_number}
-    Time: {data.missed_at}
+    call_type = (data.call_type or "MISSED").upper()
 
-    Rules:
-    - Under 140 characters.
-    - Mention I am currently occupied and ask if it is urgent.
-    - Return ONLY the exact text string to send.
-    """
+    if call_type == "DECLINED":
+        system_prompt = (
+            "You are an executive personal assistant. Generate a polite, concise SMS auto-reply "
+            "for an incoming phone call that I had to decline/cut because I am busy or in a meeting. "
+            "Rules: Under 140 characters. Briefly apologize for having to decline the call, mention currently occupied/in a meeting, "
+            "and invite them to text what they need. Return ONLY the exact text string to send without quotation marks."
+        )
+        default_reply = "Hi! Sorry I had to decline your call, I'm currently occupied. Please text me what you need and I'll get back to you shortly."
+    else:
+        system_prompt = (
+            "You are an executive personal assistant. Generate a polite, concise SMS auto-reply for a missed phone call. "
+            "Rules: Under 140 characters. Mention I missed their call, am currently occupied, and ask them to text if it is urgent. "
+            "Return ONLY the exact text string to send without quotation marks."
+        )
+        default_reply = "Hi! I missed your call. I am currently occupied—please text me if it's urgent, and I'll get back to you shortly."
 
-    sms_reply = "Hi! I missed your call. I am currently occupied—please let me know if it's urgent, and I'll get back to you shortly."
+    sms_reply = default_reply
 
     if deepseek_client:
         try:
@@ -384,11 +394,11 @@ async def handle_missed_call(data: MissedCallPayload, db: Session = Depends(get_
                 messages=[
                     {
                         "role": "system",
-                        "content": "Generate a polite, concise SMS auto-reply for a missed call. Rules: Under 140 characters. Mention I am currently occupied and ask if it is urgent. Return ONLY the exact text string to send without quotation marks."
+                        "content": system_prompt
                     },
                     {
                         "role": "user",
-                        "content": f"Caller Name: {data.caller_name}\nCaller Number: {data.caller_number}\nTime: {data.missed_at}"
+                        "content": f"Caller Name: {data.caller_name}\nCaller Number: {data.caller_number}\nTime: {data.missed_at}\nCall Action: {call_type}"
                     }
                 ],
                 temperature=0.3,
@@ -401,9 +411,9 @@ async def handle_missed_call(data: MissedCallPayload, db: Session = Depends(get_
         try:
             response = gemini_client.models.generate_content(
                 model="gemini-2.5-flash",
-                contents=prompt,
+                contents=f"{system_prompt}\n\nCaller Name: {data.caller_name}\nCaller Number: {data.caller_number}\nTime: {data.missed_at}",
             )
-            sms_reply = response.text.strip()
+            sms_reply = response.text.strip().strip('"')
         except Exception as e:
             print(f"Gemini missed-call error: {e}")
 
@@ -411,6 +421,7 @@ async def handle_missed_call(data: MissedCallPayload, db: Session = Depends(get_
     call_record = MissedCallRecord(
         caller_number=data.caller_number,
         caller_name=data.caller_name or "Unknown",
+        call_type=call_type,
         missed_at=data.missed_at,
         sms_reply=sms_reply,
         status="GENERATED"
@@ -423,6 +434,7 @@ async def handle_missed_call(data: MissedCallPayload, db: Session = Depends(get_
         "id": call_record.id,
         "caller_number": call_record.caller_number,
         "caller_name": call_record.caller_name,
+        "call_type": call_record.call_type,
         "missed_at": call_record.missed_at,
         "sms_reply": call_record.sms_reply,
         "status": call_record.status,
@@ -451,6 +463,7 @@ def get_missed_calls(
                 "id": r.id,
                 "caller_number": r.caller_number,
                 "caller_name": r.caller_name,
+                "call_type": getattr(r, "call_type", "MISSED") or "MISSED",
                 "missed_at": r.missed_at,
                 "sms_reply": r.sms_reply,
                 "status": r.status,
