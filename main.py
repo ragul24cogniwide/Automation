@@ -12,7 +12,7 @@ from sqlalchemy import text, desc
 from dotenv import load_dotenv
 
 from database import engine, get_db, init_db
-from models import EmailTriageRecord, MissedCallRecord
+from models import EmailTriageRecord, MissedCallRecord, SmsMessageRecord
 
 load_dotenv()
 
@@ -48,6 +48,17 @@ async def lifespan(app: FastAPI):
         init_db()
         with engine.connect() as conn:
             conn.execute(text("ALTER TABLE missed_calls ADD COLUMN IF NOT EXISTS call_type VARCHAR(50) DEFAULT 'MISSED';"))
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS sms_messages (
+                    id SERIAL PRIMARY KEY,
+                    phone_number VARCHAR(50) NOT NULL,
+                    contact_name VARCHAR(255) DEFAULT 'Unknown',
+                    role VARCHAR(20) NOT NULL,
+                    message TEXT NOT NULL,
+                    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+                );
+            """))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_sms_messages_phone_number ON sms_messages(phone_number);"))
             conn.commit()
         print("Neon PostgreSQL tables verified successfully.")
     except Exception as e:
@@ -97,6 +108,12 @@ class MissedCallPayload(BaseModel):
 
 class MissedCallStatusUpdate(BaseModel):
     status: str
+
+
+class SmsChatPayload(BaseModel):
+    phone_number: str
+    contact_name: Optional[str] = "Unknown"
+    message: str
 
 
 # --- Endpoints ---
@@ -518,6 +535,121 @@ def get_stats(db: Session = Depends(get_db)):
         "action_required_emails": action_required_emails,
         "new_emails": new_emails,
         "total_missed_calls": total_missed_calls
+    }
+
+
+@app.post("/api/sms-chat")
+async def handle_sms_chat(data: SmsChatPayload, db: Session = Depends(get_db)):
+    """
+    Handles an incoming SMS reply from a contact/caller, maintains isolated conversation
+    memory strictly by phone number, generates a response using DeepSeek AI, and stores the interaction.
+    """
+    clean_phone = data.phone_number.strip()
+    contact_name = data.contact_name.strip() if data.contact_name else "Unknown"
+    has_name = bool(contact_name and contact_name.lower() != "unknown")
+
+    # 1. Fetch recent history strictly for this phone number (Guarantees zero multi-user cross-talk)
+    history_records = (
+        db.query(SmsMessageRecord)
+        .filter(SmsMessageRecord.phone_number == clean_phone)
+        .order_by(desc(SmsMessageRecord.created_at))
+        .limit(8)
+        .all()
+    )
+    # Reverse to chronological order (oldest first)
+    chronological_history = list(reversed(history_records))
+
+    # 2. Build isolated DeepSeek conversation payload
+    system_instruction = (
+        f"You are Ragul's personal AI executive assistant chatting with {contact_name if has_name else 'the caller'} over SMS. "
+        "Ragul is currently occupied and will review this conversation shortly. "
+        "Politely answer their message, acknowledge their request, take down important notes, or provide brief assistance. "
+        "Rules: Keep under 160 characters (1 standard SMS page). Do not confuse this person with anyone else. "
+        "Return ONLY the exact text string to send as an SMS without quotation marks."
+    )
+
+    messages = [{"role": "system", "content": system_instruction}]
+    for rec in chronological_history:
+        messages.append({"role": rec.role, "content": rec.message})
+    messages.append({"role": "user", "content": data.message})
+
+    reply_text = (
+        f"Hi {contact_name}, thanks for the message. Ragul is currently occupied, but I've noted this down and he will follow up shortly."
+        if has_name
+        else "Hi, thanks for the message. Ragul is currently occupied, but I've noted this down and he will follow up shortly."
+    )
+
+    if deepseek_client:
+        try:
+            completion = deepseek_client.chat.completions.create(
+                model="deepseek-chat",
+                messages=messages,
+                temperature=0.3,
+                max_tokens=80
+            )
+            reply_text = completion.choices[0].message.content.strip().strip('"')
+        except Exception as e:
+            print(f"DeepSeek SMS chat error: {e}")
+    elif gemini_client:
+        try:
+            prompt = f"{system_instruction}\n\nSender ({clean_phone}): {data.message}"
+            response = gemini_client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+            )
+            reply_text = response.text.strip().strip('"')
+        except Exception as e:
+            print(f"Gemini SMS chat error: {e}")
+
+    # 3. Persist incoming user message and assistant reply with phone_number index
+    user_msg = SmsMessageRecord(
+        phone_number=clean_phone,
+        contact_name=contact_name,
+        role="user",
+        message=data.message
+    )
+    assistant_msg = SmsMessageRecord(
+        phone_number=clean_phone,
+        contact_name=contact_name,
+        role="assistant",
+        message=reply_text
+    )
+    db.add(user_msg)
+    db.add(assistant_msg)
+    db.commit()
+
+    return {
+        "phone_number": clean_phone,
+        "contact_name": contact_name,
+        "reply": reply_text,
+        "status": "GENERATED"
+    }
+
+
+@app.get("/api/sms-conversations")
+def get_sms_conversations(
+    phone_number: Optional[str] = None,
+    limit: int = Query(default=50, le=200),
+    db: Session = Depends(get_db)
+):
+    """Retrieve SMS conversation history, optionally filtered by phone number."""
+    query = db.query(SmsMessageRecord)
+    if phone_number:
+        query = query.filter(SmsMessageRecord.phone_number == phone_number.strip())
+    records = query.order_by(desc(SmsMessageRecord.created_at)).limit(limit).all()
+    return {
+        "total": len(records),
+        "messages": [
+            {
+                "id": r.id,
+                "phone_number": r.phone_number,
+                "contact_name": r.contact_name,
+                "role": r.role,
+                "message": r.message,
+                "created_at": r.created_at.isoformat() if r.created_at else None
+            }
+            for r in records
+        ]
     }
 
 

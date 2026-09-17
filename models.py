@@ -33,3 +33,15 @@ class MissedCallRecord(Base):
     sms_reply = Column(Text, nullable=True)
     status = Column(String(50), default="GENERATED", index=True)  # GENERATED, SENT, FAILED
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class SmsMessageRecord(Base):
+    __tablename__ = "sms_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    phone_number = Column(String(50), index=True, nullable=False)
+    contact_name = Column(String(255), default="Unknown")
+    role = Column(String(20), nullable=False)  # 'user' or 'assistant'
+    message = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
