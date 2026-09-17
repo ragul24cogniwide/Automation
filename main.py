@@ -16,7 +16,21 @@ from models import EmailTriageRecord, MissedCallRecord
 
 load_dotenv()
 
-# Gemini setup
+# DeepSeek setup (Primary LLM)
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+deepseek_client = None
+if DEEPSEEK_API_KEY and DEEPSEEK_API_KEY != "your_deepseek_api_key_here":
+    try:
+        from openai import OpenAI
+        deepseek_client = OpenAI(
+            api_key=DEEPSEEK_API_KEY,
+            base_url="https://api.deepseek.com"
+        )
+        print("DeepSeek client initialized successfully.")
+    except Exception as e:
+        print(f"Warning: Could not initialize DeepSeek client: {e}")
+
+# Gemini setup (Fallback LLM)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 gemini_client = None
 if GEMINI_API_KEY and GEMINI_API_KEY != "your_gemini_api_key_here":
@@ -112,7 +126,9 @@ def health_check(db: Session = Depends(get_db)):
     return {
         "status": "online",
         "database": db_status,
+        "deepseek_configured": deepseek_client is not None,
         "gemini_configured": gemini_client is not None,
+        "active_model": "deepseek-chat" if deepseek_client else ("gemini-2.5-flash" if gemini_client else "rule-based-fallback"),
         "timestamp": datetime.utcnow().isoformat()
     }
 
@@ -156,7 +172,32 @@ async def triage_email(data: EmailPayload, db: Session = Depends(get_db)):
     action_required = False
     suggested_reply = ""
 
-    if gemini_client:
+    if deepseek_client:
+        try:
+            completion = deepseek_client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are an executive personal assistant. Analyze the incoming email and return a valid JSON object with keys: priority ('URGENT', 'IMPORTANT', or 'LOW'), summary (1-2 sentence overview of what sender needs), action_required (boolean), suggested_reply (crisp professional response draft if action_required is true, else empty string)."
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Sender: {data.sender}\nSubject: {data.subject}\nContent: {content_text}"
+                    }
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.2,
+            )
+            parsed = json.loads(completion.choices[0].message.content)
+            priority = parsed.get("priority", "LOW").upper()
+            summary = parsed.get("summary", summary)
+            action_required = bool(parsed.get("action_required", False))
+            suggested_reply = parsed.get("suggested_reply", "")
+        except Exception as e:
+            print(f"DeepSeek triage error: {e}")
+            summary = f"Auto-triaged: {summary[:100]}"
+    elif gemini_client:
         try:
             from google.genai import types
             response = gemini_client.models.generate_content(
@@ -336,7 +377,27 @@ async def handle_missed_call(data: MissedCallPayload, db: Session = Depends(get_
 
     sms_reply = "Hi! I missed your call. I am currently occupied—please let me know if it's urgent, and I'll get back to you shortly."
 
-    if gemini_client:
+    if deepseek_client:
+        try:
+            completion = deepseek_client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "Generate a polite, concise SMS auto-reply for a missed call. Rules: Under 140 characters. Mention I am currently occupied and ask if it is urgent. Return ONLY the exact text string to send without quotation marks."
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Caller Name: {data.caller_name}\nCaller Number: {data.caller_number}\nTime: {data.missed_at}"
+                    }
+                ],
+                temperature=0.3,
+                max_tokens=60
+            )
+            sms_reply = completion.choices[0].message.content.strip().strip('"')
+        except Exception as e:
+            print(f"DeepSeek missed-call error: {e}")
+    elif gemini_client:
         try:
             response = gemini_client.models.generate_content(
                 model="gemini-2.5-flash",
