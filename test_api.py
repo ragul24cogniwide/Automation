@@ -21,6 +21,14 @@ def run_tests():
     assert health_data["database"] == "connected", f"Database not connected: {health_data}"
     print(f" PASS: Health check OK, Database: {health_data['database']}")
 
+    # 1b. Test Ultra-fast Keepalive Ping
+    print("\n[1b] Testing GET /api/ping...")
+    res_ping = client.get("/api/ping")
+    assert res_ping.status_code == 200, f"Expected 200, got {res_ping.status_code}"
+    ping_data = res_ping.json()
+    assert ping_data["status"] == "ok", f"Expected ok status, got: {ping_data}"
+    print(f" PASS: Keepalive ping OK, status: {ping_data['status']}")
+
     # 2. Test Root Endpoint
     print("\n[2] Testing GET /...")
     res = client.get("/")

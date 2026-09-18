@@ -124,6 +124,7 @@ def root():
         "service": "Personal AI Agent Router",
         "status": "online",
         "endpoints": {
+            "ping": "/api/ping",
             "health": "/api/health",
             "stats": "/api/stats",
             "triage_email": "/api/triage-email",
@@ -131,6 +132,16 @@ def root():
             "missed_call": "/api/missed-call",
             "missed_calls": "/api/missed-calls",
         }
+    }
+
+
+@app.get("/api/ping")
+def ping():
+    """Ultra-fast keepalive ping endpoint to prevent Render spin-down."""
+    return {
+        "status": "ok",
+        "service": "Personal AI Agent Router",
+        "timestamp": datetime.utcnow().isoformat()
     }
 
 
@@ -392,19 +403,21 @@ async def handle_missed_call(data: MissedCallPayload, db: Session = Depends(get_
     if call_type == "DECLINED":
         system_prompt = (
             "You are Ragul's personal AI executive assistant. Generate a polite, concise SMS auto-reply "
-            "for an incoming phone call that Ragul had to decline/cut because he is busy. "
-            f"Mandatory structure: '{greeting_prefix} Ragul is unable to attend the call right now. Please feel free to say the purpose of the call, I will catch you soon.' "
-            "Rules: Under 140 characters. Return ONLY the exact text string to send without quotation marks."
+            "for an incoming phone call that Ragul had to decline because he is in a meeting or occupied. "
+            f"Address the caller as {greeting_prefix[:-1] if greeting_prefix.endswith(',') else greeting_prefix}. "
+            "Politely explain that Ragul cannot take the call right now, and invite them to text their purpose or query so he can follow up. "
+            "Rules: Under 140 characters. Professional, natural tone. Return ONLY the exact text string to send without quotation marks."
         )
-        default_reply = f"{greeting_prefix} Ragul is unable to attend the call right now. Please feel free to say the purpose of the call, I will catch you soon."
+        default_reply = f"{greeting_prefix} Ragul is currently occupied and unable to take the call. Please text your message here, and he will follow up shortly."
     else:
         system_prompt = (
             "You are Ragul's personal AI executive assistant. Generate a polite, concise SMS auto-reply "
             "for a missed phone call. "
-            f"Mandatory structure: '{greeting_prefix} Ragul is unable to attend the call. Please feel free to say the purpose of the call, I will catch you soon.' "
-            "Rules: Under 140 characters. Return ONLY the exact text string to send without quotation marks."
+            f"Address the caller as {greeting_prefix[:-1] if greeting_prefix.endswith(',') else greeting_prefix}. "
+            "Let them know Ragul missed their call and invite them to leave a message. "
+            "Rules: Under 140 characters. Professional, natural tone. Return ONLY the exact text string to send without quotation marks."
         )
-        default_reply = f"{greeting_prefix} Ragul is unable to attend the call. Please feel free to say the purpose of the call, I will catch you soon."
+        default_reply = f"{greeting_prefix} Ragul missed your call. Please feel free to text your purpose or message here, and he will catch you shortly."
 
     sms_reply = default_reply
 
