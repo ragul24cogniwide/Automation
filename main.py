@@ -67,8 +67,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Personal AI Agent Router",
-    description="Automated Email Triage & Missed Call SMS Agent powered by Gemini & Neon PostgreSQL",
+    title="Sage AI Personal Agent Router",
+    description="Automated Email Triage & Missed Call SMS Agent powered by Gemini, DeepSeek & Neon PostgreSQL",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -121,7 +121,7 @@ class SmsChatPayload(BaseModel):
 @app.get("/")
 def root():
     return {
-        "service": "Personal AI Agent Router",
+        "service": "Sage AI Personal Agent Router",
         "status": "online",
         "endpoints": {
             "ping": "/api/ping",
@@ -140,7 +140,7 @@ def ping():
     """Ultra-fast keepalive ping endpoint to prevent Render spin-down."""
     return {
         "status": "ok",
-        "service": "Personal AI Agent Router",
+        "service": "Sage AI Personal Agent Router",
         "timestamp": datetime.utcnow().isoformat()
     }
 
@@ -398,26 +398,27 @@ async def handle_missed_call(data: MissedCallPayload, db: Session = Depends(get_
     call_type = (data.call_type or "MISSED").upper()
 
     has_name = bool(data.caller_name and data.caller_name.strip() and data.caller_name.strip().lower() != "unknown")
-    greeting_prefix = f"Hi {data.caller_name.strip()}," if has_name else "Hi,"
+    caller_first_name = data.caller_name.strip() if has_name else ""
+    salutation = f"Hi {caller_first_name}," if has_name else "Hi,"
 
     if call_type == "DECLINED":
         system_prompt = (
-            "You are Ragul's personal AI executive assistant. Generate a polite, concise SMS auto-reply "
-            "for an incoming phone call that Ragul had to decline because he is in a meeting or occupied. "
-            f"Address the caller as {greeting_prefix[:-1] if greeting_prefix.endswith(',') else greeting_prefix}. "
-            "Politely explain that Ragul cannot take the call right now, and invite them to text their purpose or query so he can follow up. "
-            "Rules: Under 140 characters. Professional, natural tone. Return ONLY the exact text string to send without quotation marks."
+            "You are Sage, Ragul's personal AI executive assistant. Generate a polite, concise SMS auto-reply "
+            "for an incoming phone call that Ragul had to decline because he is occupied or in a meeting. "
+            f"Address the caller as {salutation} and introduce yourself as Sage (e.g. '{salutation} I am Sage. Ragul is unable to attend the call right now...'). "
+            "Invite them to text their purpose or query so Ragul can follow up. "
+            "Rules: Under 140 characters. Professional, natural, helpful tone. Return ONLY the exact text string to send without quotation marks."
         )
-        default_reply = f"{greeting_prefix} Ragul is currently occupied and unable to take the call. Please text your message here, and he will follow up shortly."
+        default_reply = f"{salutation} I am Sage. Ragul is currently occupied and unable to attend the call right now. Please feel free to text your message here, and he will follow up shortly."
     else:
         system_prompt = (
-            "You are Ragul's personal AI executive assistant. Generate a polite, concise SMS auto-reply "
+            "You are Sage, Ragul's personal AI executive assistant. Generate a polite, concise SMS auto-reply "
             "for a missed phone call. "
-            f"Address the caller as {greeting_prefix[:-1] if greeting_prefix.endswith(',') else greeting_prefix}. "
-            "Let them know Ragul missed their call and invite them to leave a message. "
-            "Rules: Under 140 characters. Professional, natural tone. Return ONLY the exact text string to send without quotation marks."
+            f"Address the caller as {salutation} and introduce yourself as Sage (e.g. '{salutation} I am Sage. Ragul is unable to attend the call right now...'). "
+            "Invite them to text their purpose or message so Ragul can follow up. "
+            "Rules: Under 140 characters. Professional, natural, helpful tone. Return ONLY the exact text string to send without quotation marks."
         )
-        default_reply = f"{greeting_prefix} Ragul missed your call. Please feel free to text your purpose or message here, and he will catch you shortly."
+        default_reply = f"{salutation} I am Sage. Ragul is unable to attend the call right now. Please feel free to text your purpose or message here, and he will follow up shortly."
 
     sms_reply = default_reply
 
@@ -572,11 +573,15 @@ async def handle_sms_chat(data: SmsChatPayload, db: Session = Depends(get_db)):
     # Reverse to chronological order (oldest first)
     chronological_history = list(reversed(history_records))
 
+    has_name = bool(contact_name and contact_name.lower() != "unknown")
+    salutation = f"Hi {contact_name}," if has_name else "Hi,"
+
     # 2. Build isolated DeepSeek conversation payload
     system_instruction = (
-        f"You are Ragul's personal AI executive assistant chatting with {contact_name if has_name else 'the caller'} over SMS. "
+        f"You are Sage, Ragul's personal AI executive assistant chatting with {contact_name if has_name else 'the caller'} over SMS. "
         "Ragul is currently occupied and will review this conversation shortly. "
         "Politely answer their message, acknowledge their request, take down important notes, or provide brief assistance. "
+        "Introduce yourself as Sage if the user asks who this is or in the opening exchange. "
         "Rules: Keep under 160 characters (1 standard SMS page). Do not confuse this person with anyone else. "
         "Return ONLY the exact text string to send as an SMS without quotation marks."
     )
@@ -587,9 +592,7 @@ async def handle_sms_chat(data: SmsChatPayload, db: Session = Depends(get_db)):
     messages.append({"role": "user", "content": data.message})
 
     reply_text = (
-        f"Hi {contact_name}, thanks for the message. Ragul is currently occupied, but I've noted this down and he will follow up shortly."
-        if has_name
-        else "Hi, thanks for the message. Ragul is currently occupied, but I've noted this down and he will follow up shortly."
+        f"{salutation} I am Sage. Thanks for the message! Ragul is occupied right now, but I've noted this down and he will follow up shortly."
     )
 
     if deepseek_client:
