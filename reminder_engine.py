@@ -80,7 +80,33 @@ Rules:
 4. If intent="GENERAL_CHAT", provide a helpful, polite executive assistant response.
 5. Return ONLY raw valid JSON, no markdown codeblocks."""
 
-    # 1. Try DeepSeek
+    # 1. Try OpenAI (ChatGPT)
+    openai_key = os.getenv("OPENAI_API_KEY")
+    if openai_key and openai_key != "your_openai_api_key_here":
+        try:
+            from openai import AsyncOpenAI
+            client = AsyncOpenAI(api_key=openai_key)
+            response = await client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": clean_text},
+                ],
+                temperature=0.1,
+            )
+            content = response.choices[0].message.content.strip()
+            if content.startswith("```json"):
+                content = content[7:]
+            if content.startswith("```"):
+                content = content[3:]
+            if content.endswith("```"):
+                content = content[:-3]
+            parsed = json.loads(content.strip())
+            return parsed
+        except Exception as e:
+            logger.warning(f"OpenAI intent parsing failed: {e}")
+
+    # 2. Try DeepSeek
     if deepseek_key and deepseek_key != "your_deepseek_api_key_here":
         try:
             from openai import AsyncOpenAI
@@ -106,7 +132,7 @@ Rules:
         except Exception as e:
             logger.warning(f"DeepSeek intent parsing failed: {e}")
 
-    # 2. Try Gemini
+    # 3. Try Gemini
     if gemini_key and gemini_key != "your_gemini_api_key_here":
         try:
             from google import genai
