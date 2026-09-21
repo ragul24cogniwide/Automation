@@ -25,7 +25,8 @@ WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
 WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN")
 
 USER_WHATSAPP_NUMBER = os.getenv("USER_WHATSAPP_NUMBER")
-WHATSAPP_BRIDGE_URL = os.getenv("WHATSAPP_BRIDGE_URL", "http://localhost:3001")
+DEFAULT_BRIDGE_URL = "https://automation-whatsapp-ueor.onrender.com"
+WHATSAPP_BRIDGE_URL = os.getenv("WHATSAPP_BRIDGE_URL") or DEFAULT_BRIDGE_URL
 
 
 async def send_whatsapp_message(to_number: str, message: str, remote_jid: Optional[str] = None) -> Dict[str, Any]:
@@ -45,7 +46,7 @@ async def send_whatsapp_message(to_number: str, message: str, remote_jid: Option
         return {"status": "error", "message": "No recipient phone number specified."}
 
     # 1. Try Baileys Self-Hosted Bridge First (Avoids Twilio/Meta blockers)
-    bridge_url = os.getenv("WHATSAPP_BRIDGE_URL") or WHATSAPP_BRIDGE_URL or "http://localhost:3001"
+    bridge_url = os.getenv("WHATSAPP_BRIDGE_URL") or WHATSAPP_BRIDGE_URL or DEFAULT_BRIDGE_URL
     if bridge_url:
         try:
             url = f"{bridge_url.rstrip('/')}/send"
@@ -53,7 +54,7 @@ async def send_whatsapp_message(to_number: str, message: str, remote_jid: Option
             payload = {"to": clean_digits or "self", "message": message}
             if remote_jid:
                 payload["remote_jid"] = remote_jid
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=25.0) as client:
                 res = await client.post(
                     url,
                     json=payload,
@@ -62,11 +63,13 @@ async def send_whatsapp_message(to_number: str, message: str, remote_jid: Option
                     logger.info(f"WhatsApp message dispatched via Baileys Bridge to {remote_jid or clean_digits or 'self'}")
                     return {"status": "success", "provider": "baileys_bridge", "response": res.json()}
                 elif res.status_code == 503:
-                    logger.warning(f"Baileys Bridge not connected yet: {res.text}")
+                    logger.warning(f"Baileys Bridge not ready (503): {res.text}")
+                    return {"status": "error", "provider": "baileys_bridge", "detail": res.text}
                 else:
                     logger.error(f"Baileys Bridge returned status {res.status_code}: {res.text}")
-        except httpx.ConnectError:
-            logger.debug(f"Baileys Bridge offline at {WHATSAPP_BRIDGE_URL}")
+                    return {"status": "error", "provider": "baileys_bridge", "detail": res.text}
+        except httpx.ConnectError as e:
+            logger.warning(f"Baileys Bridge offline at {bridge_url}: {e}")
         except Exception as e:
             logger.warning(f"Error dispatching via Baileys Bridge: {e}")
 

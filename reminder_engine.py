@@ -237,9 +237,13 @@ async def reminder_scheduler_loop():
                         f"━━━━━━━━━━━━━━━━━━━\n"
                         f"✓ _Marked as completed. Have you finished this?_"
                     )
-                    await send_whatsapp_message(r.user_phone, msg)
-                    r.status = "SENT"
-                    db.commit()
+                    res = await send_whatsapp_message(r.user_phone, msg)
+                    if res and res.get("status") == "success":
+                        r.status = "SENT"
+                        db.commit()
+                        logger.info(f"Reminder #{r.id} successfully sent to WhatsApp and marked SENT.")
+                    else:
+                        logger.warning(f"Reminder #{r.id} dispatch failed: {res}. Keeping PENDING to retry in next cycle.")
 
             # --- B. Check Daily Morning Briefing (8:30 AM IST) ---
             target_hour = DAILY_BRIEFING_HOUR
@@ -254,9 +258,12 @@ async def reminder_scheduler_loop():
                     logger.info(f"Dispatching scheduled Daily Briefing to {USER_WHATSAPP_NUMBER}...")
                     with SessionLocal() as db:
                         briefing_text = generate_daily_briefing_text(db, user_name="Ragul")
-                        await send_whatsapp_message(USER_WHATSAPP_NUMBER, briefing_text)
-                    last_briefing_date = today_date_str
-                    logger.info(f"Daily Briefing sent successfully for {today_date_str}")
+                        res = await send_whatsapp_message(USER_WHATSAPP_NUMBER, briefing_text)
+                    if res and res.get("status") == "success":
+                        last_briefing_date = today_date_str
+                        logger.info(f"Daily Briefing sent successfully for {today_date_str}")
+                    else:
+                        logger.warning(f"Daily Briefing dispatch failed: {res}. Will retry.")
 
         except Exception as e:
             logger.error(f"Error in reminder_scheduler_loop: {e}")
