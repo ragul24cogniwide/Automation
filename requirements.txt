@@ -7,3 +7,6 @@ sqlalchemy>=2.0.0
 psycopg2-binary>=2.9.9
 openai>=1.0.0
 httpx>=0.25.0
+python-dateutil>=2.8.2
+pytz>=2024.1
+python-multipart>=0.0.9

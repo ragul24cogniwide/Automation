@@ -45,3 +45,16 @@ class SmsMessageRecord(Base):
     message = Column(Text, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
+
+class WhatsAppReminderRecord(Base):
+    __tablename__ = "whatsapp_reminders"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_phone = Column(String(50), index=True, nullable=False)
+    reminder_text = Column(Text, nullable=False)
+    raw_input = Column(Text, nullable=True)
+    is_voice = Column(Boolean, default=False)
+    remind_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    status = Column(String(20), default="PENDING", index=True)  # PENDING, SENT, CANCELLED
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+

@@ -1,10 +1,11 @@
 import os
 import json
+import asyncio
 from contextlib import asynccontextmanager
 from typing import Optional, List
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from fastapi import FastAPI, HTTPException, Depends, Query
+from fastapi import FastAPI, HTTPException, Depends, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -12,7 +13,19 @@ from sqlalchemy import text, desc
 from dotenv import load_dotenv
 
 from database import engine, get_db, init_db
-from models import EmailTriageRecord, MissedCallRecord, SmsMessageRecord
+from models import EmailTriageRecord, MissedCallRecord, SmsMessageRecord, WhatsAppReminderRecord
+from whatsapp_service import (
+    send_whatsapp_message,
+    download_whatsapp_audio,
+    transcribe_audio_bytes,
+    generate_daily_briefing_text,
+)
+from reminder_engine import (
+    parse_whatsapp_intent,
+    save_reminder_to_db,
+    reminder_scheduler_loop,
+    get_current_local_time,
+)
 
 load_dotenv()
 
@@ -44,6 +57,7 @@ if GEMINI_API_KEY and GEMINI_API_KEY != "your_gemini_api_key_here":
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Initialize database tables on server startup
+    scheduler_task = None
     try:
         init_db()
         with engine.connect() as conn:
@@ -59,11 +73,30 @@ async def lifespan(app: FastAPI):
                 );
             """))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_sms_messages_phone_number ON sms_messages(phone_number);"))
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS whatsapp_reminders (
+                    id SERIAL PRIMARY KEY,
+                    user_phone VARCHAR(50) NOT NULL,
+                    reminder_text TEXT NOT NULL,
+                    raw_input TEXT,
+                    is_voice BOOLEAN DEFAULT FALSE,
+                    remind_at TIMESTAMPTZ NOT NULL,
+                    status VARCHAR(20) DEFAULT 'PENDING',
+                    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+                );
+            """))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_whatsapp_reminders_status ON whatsapp_reminders(status);"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_whatsapp_reminders_remind_at ON whatsapp_reminders(remind_at);"))
             conn.commit()
         print("Neon PostgreSQL tables verified successfully.")
+
+        # Start background reminder scheduler & morning briefing loop
+        scheduler_task = asyncio.create_task(reminder_scheduler_loop())
     except Exception as e:
         print(f"Database initialization warning: {e}")
     yield
+    if scheduler_task:
+        scheduler_task.cancel()
 
 
 app = FastAPI(
@@ -688,3 +721,241 @@ def seed_sample_email(db: Session = Depends(get_db)):
     db.commit()
     db.refresh(sample)
     return {"message": "Sample urgent email seeded successfully!", "id": sample.id}
+
+
+# =====================================================================
+# --- SAGE WHATSAPP ASSISTANT ROUTES (Briefing & Voice Reminders) ---
+# =====================================================================
+
+@app.get("/api/whatsapp/webhook")
+def verify_whatsapp_webhook(
+    hub_mode: Optional[str] = Query(None, alias="hub.mode"),
+    hub_challenge: Optional[str] = Query(None, alias="hub.challenge"),
+    hub_verify_token: Optional[str] = Query(None, alias="hub.verify_token")
+):
+    """Handles Meta WhatsApp Cloud API Webhook Verification."""
+    expected_token = os.getenv("WHATSAPP_VERIFY_TOKEN", "sage_whatsapp_secret")
+    if hub_mode == "subscribe" and hub_verify_token == expected_token:
+        print("Meta WhatsApp Webhook verified successfully!")
+        return int(hub_challenge) if hub_challenge and hub_challenge.isdigit() else hub_challenge
+    raise HTTPException(status_code=403, detail="Verification token mismatch")
+
+
+@app.post("/api/whatsapp/webhook")
+async def handle_whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
+    """
+    Unified WhatsApp Webhook:
+    Supports both Twilio WhatsApp Sandbox (form-data) and Meta Cloud API (JSON).
+    Handles:
+    - Voice notes / voicemails (downloads & transcribes audio)
+    - Reminders extraction (e.g. 'Remind me in 30 mins to check server')
+    - Executive Briefing trigger on demand ('briefing' or 'summary')
+    """
+    content_type = request.headers.get("content-type", "")
+
+    sender_phone = None
+    user_text = ""
+    is_voice = False
+    media_url = None
+
+    # --- 1. Parse Twilio WhatsApp Request (Form-data) ---
+    if "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+        form_data = await request.form()
+        sender_phone = form_data.get("From", "").strip()
+        user_text = form_data.get("Body", "").strip()
+        num_media = int(form_data.get("NumMedia", "0"))
+        if num_media > 0:
+            media_url = form_data.get("MediaUrl0")
+            media_type = form_data.get("MediaContentType0", "")
+            if "audio" in media_type or "ogg" in media_type or "mp4" in media_type:
+                is_voice = True
+
+    # --- 2. Parse Baileys Bridge or Meta WhatsApp Request (JSON) ---
+    elif "application/json" in content_type:
+        try:
+            body_json = await request.json()
+            # Check if payload is from our Baileys Bridge (whatsapp-bridge)
+            if "remote_jid" in body_json or "audio_base64" in body_json or ("sender" in body_json and "text" in body_json):
+                sender_phone = body_json.get("sender", "").strip()
+                user_text = body_json.get("text", "") or ""
+                is_voice = bool(body_json.get("is_voice", False))
+                audio_base64 = body_json.get("audio_base64")
+                mime_type = body_json.get("mime_type", "audio/ogg")
+
+                if is_voice and audio_base64:
+                    try:
+                        import base64
+                        audio_bytes = base64.b64decode(audio_base64)
+                        transcribed = await transcribe_audio_bytes(audio_bytes, mime_type=mime_type)
+                        if transcribed:
+                            user_text = transcribed
+                        print(f"Transcribed Baileys voice note: '{user_text}'")
+                    except Exception as err:
+                        print(f"Error decoding/transcribing audio from Baileys bridge: {err}")
+            else:
+                # Meta Cloud API JSON format
+                entry = body_json.get("entry", [{}])[0]
+                change = entry.get("changes", [{}])[0].get("value", {})
+                messages = change.get("messages", [])
+                if messages:
+                    msg = messages[0]
+                    sender_phone = f"whatsapp:+{msg.get('from', '')}"
+                    msg_type = msg.get("type", "")
+                    if msg_type == "text":
+                        user_text = msg.get("text", {}).get("body", "")
+                    elif msg_type == "audio" or msg_type == "voice":
+                        is_voice = True
+                        # Meta audio ID requires Graph API query
+                        audio_id = msg.get("audio", {}).get("id") or msg.get("voice", {}).get("id")
+                        if audio_id:
+                            media_url = f"https://graph.facebook.com/v20.0/{audio_id}"
+        except Exception as e:
+            print(f"Error parsing WhatsApp JSON: {e}")
+
+    if not sender_phone:
+        return {"status": "ignored", "reason": "No sender identified"}
+
+    print(f"Incoming WhatsApp message from {sender_phone} | is_voice={is_voice} | text={user_text}")
+
+    # --- 3. Process Voice Note / Voicemail (if media_url was provided e.g. Twilio/Meta) ---
+    if is_voice and media_url and not user_text:
+        # Step A: Download audio payload
+        audio_bytes = await download_whatsapp_audio(media_url)
+        if audio_bytes:
+            # Step B: Transcribe audio using Gemini / Whisper
+            user_text = await transcribe_audio_bytes(audio_bytes)
+            print(f"Transcribed WhatsApp voice note: '{user_text}'")
+        else:
+            await send_whatsapp_message(
+                sender_phone,
+                "⚠️ Sage received your voice note, but could not download the audio file. Please ensure Twilio credentials are configured."
+            )
+            return {"status": "error", "reason": "Audio download failed"}
+
+    if not user_text.strip():
+        await send_whatsapp_message(
+            sender_phone,
+            "👋 Hi! I received your message. You can text or send a voice note with any reminder (e.g. _'Remind me at 5 PM to check server'_) or text *briefing* to see today's updates."
+        )
+        return {"status": "ok"}
+
+    # --- 4. Handle Special Command: 'briefing' or 'summary' ---
+    lower_input = user_text.strip().lower()
+    if lower_input in ("briefing", "summary", "today", "today's work", "todays work", "/briefing"):
+        briefing = generate_daily_briefing_text(db, user_name="Ragul")
+        await send_whatsapp_message(sender_phone, briefing)
+        return {"status": "ok", "action": "briefing_sent"}
+
+    # --- 5. Handle Special Command: 'reminders' ---
+    if lower_input in ("reminders", "my reminders", "list reminders", "show reminders", "/reminders"):
+        active_reminders = (
+            db.query(WhatsAppReminderRecord)
+            .filter(WhatsAppReminderRecord.status == "PENDING")
+            .order_by(WhatsAppReminderRecord.remind_at)
+            .all()
+        )
+        if not active_reminders:
+            await send_whatsapp_message(sender_phone, "✓ You have no pending reminders. Send a voice note or text to create one!")
+        else:
+            lines = ["⏰ *YOUR ACTIVE REMINDERS:*"]
+            for idx, r in enumerate(active_reminders, 1):
+                time_str = r.remind_at.strftime("%b %d, %I:%M %p")
+                lines.append(f"{idx}. *{r.reminder_text}*")
+                lines.append(f"   Due: {time_str} UTC")
+            await send_whatsapp_message(sender_phone, "\n".join(lines))
+        return {"status": "ok", "action": "reminders_listed"}
+
+    # --- 6. Smart NLP Intent Parsing (Reminders & Tasks) ---
+    parsed = await parse_whatsapp_intent(user_text, is_voice=is_voice)
+
+    if parsed.get("is_reminder") or parsed.get("intent") == "REMINDER":
+        task_text = parsed.get("reminder_text", user_text)
+        remind_at_iso = parsed.get("remind_at_iso")
+        if not remind_at_iso:
+            remind_at_iso = (get_current_local_time() + timedelta(hours=1)).isoformat()
+
+        # Save to database
+        saved = save_reminder_to_db(
+            user_phone=sender_phone,
+            reminder_text=task_text,
+            remind_at_iso=remind_at_iso,
+            raw_input=user_text,
+            is_voice=is_voice,
+            db=db
+        )
+
+        reply_msg = parsed.get("reply")
+        if not reply_msg:
+            prefix = "🎙️ Voice reminder recorded!" if is_voice else "✓ Reminder scheduled!"
+            reply_msg = f"{prefix}\n\n📌 *{task_text}*\n⏰ I will ping you right here when it's time."
+
+        await send_whatsapp_message(sender_phone, reply_msg)
+        return {"status": "ok", "action": "reminder_created", "id": saved.id if saved else None}
+
+    # General query fallback response
+    reply_msg = parsed.get("reply", "✓ Received! I am monitoring your emails, missed calls, and reminders.")
+    await send_whatsapp_message(sender_phone, reply_msg)
+    return {"status": "ok", "action": "chat_reply"}
+
+
+@app.post("/api/whatsapp/briefing/trigger")
+async def trigger_whatsapp_briefing(
+    phone_number: Optional[str] = Query(None),
+    db: Session = Depends(get_db)
+):
+    """
+    Manually triggers your Executive Morning Briefing to WhatsApp immediately.
+    Useful for testing or getting an on-demand update.
+    """
+    target = phone_number or os.getenv("USER_WHATSAPP_NUMBER")
+    if not target:
+        raise HTTPException(status_code=400, detail="USER_WHATSAPP_NUMBER not configured in .env and not provided in query.")
+
+    briefing_text = generate_daily_briefing_text(db, user_name="Ragul")
+    res = await send_whatsapp_message(target, briefing_text)
+    return {
+        "status": "triggered",
+        "recipient": target,
+        "briefing_preview": briefing_text,
+        "dispatch_result": res
+    }
+
+
+@app.get("/api/whatsapp/reminders")
+def list_whatsapp_reminders(
+    status: Optional[str] = Query(None),
+    db: Session = Depends(get_db)
+):
+    """Lists scheduled WhatsApp reminders."""
+    query = db.query(WhatsAppReminderRecord)
+    if status:
+        query = query.filter(WhatsAppReminderRecord.status == status.upper())
+    records = query.order_by(desc(WhatsAppReminderRecord.created_at)).limit(50).all()
+    return {
+        "total": len(records),
+        "reminders": [
+            {
+                "id": r.id,
+                "user_phone": r.user_phone,
+                "reminder_text": r.reminder_text,
+                "is_voice": r.is_voice,
+                "remind_at": r.remind_at.isoformat() if r.remind_at else None,
+                "status": r.status,
+                "created_at": r.created_at.isoformat() if r.created_at else None
+            }
+            for r in records
+        ]
+    }
+
+
+@app.post("/api/whatsapp/send-test")
+async def test_send_whatsapp(
+    message: str = Query(default="Hello from Sage AI Assistant!"),
+    phone_number: Optional[str] = Query(None)
+):
+    """Test endpoint to verify WhatsApp message dispatch."""
+    target = phone_number or os.getenv("USER_WHATSAPP_NUMBER")
+    if not target:
+        raise HTTPException(status_code=400, detail="USER_WHATSAPP_NUMBER not set.")
+    res = await send_whatsapp_message(target, message)
+    return {"result": res, "sent_to": target}
