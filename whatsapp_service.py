@@ -28,7 +28,7 @@ USER_WHATSAPP_NUMBER = os.getenv("USER_WHATSAPP_NUMBER")
 WHATSAPP_BRIDGE_URL = os.getenv("WHATSAPP_BRIDGE_URL", "http://localhost:3001")
 
 
-async def send_whatsapp_message(to_number: str, message: str) -> Dict[str, Any]:
+async def send_whatsapp_message(to_number: str, message: str, remote_jid: Optional[str] = None) -> Dict[str, Any]:
     """
     Sends a WhatsApp message via:
     1. Baileys WhatsApp Bridge (Self-hosted, persistent in Neon DB, zero fees)
@@ -50,13 +50,16 @@ async def send_whatsapp_message(to_number: str, message: str) -> Dict[str, Any]:
         try:
             url = f"{bridge_url.rstrip('/')}/send"
             clean_digits = clean_to.replace("whatsapp:", "").replace("+", "").strip()
+            payload = {"to": clean_digits or "self", "message": message}
+            if remote_jid:
+                payload["remote_jid"] = remote_jid
             async with httpx.AsyncClient(timeout=10.0) as client:
                 res = await client.post(
                     url,
-                    json={"to": clean_digits or "self", "message": message},
+                    json=payload,
                 )
                 if res.status_code == 200:
-                    logger.info(f"WhatsApp message dispatched via Baileys Bridge to {clean_digits or 'self'}")
+                    logger.info(f"WhatsApp message dispatched via Baileys Bridge to {remote_jid or clean_digits or 'self'}")
                     return {"status": "success", "provider": "baileys_bridge", "response": res.json()}
                 elif res.status_code == 503:
                     logger.warning(f"Baileys Bridge not connected yet: {res.text}")

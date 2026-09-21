@@ -757,6 +757,7 @@ async def handle_whatsapp_webhook(request: Request, db: Session = Depends(get_db
     user_text = ""
     is_voice = False
     media_url = None
+    remote_jid = None
 
     # --- 1. Parse Twilio WhatsApp Request (Form-data) ---
     if "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
@@ -781,6 +782,7 @@ async def handle_whatsapp_webhook(request: Request, db: Session = Depends(get_db
                 is_voice = bool(body_json.get("is_voice", False))
                 audio_base64 = body_json.get("audio_base64")
                 mime_type = body_json.get("mime_type", "audio/ogg")
+                remote_jid = body_json.get("remote_jid")
 
                 if is_voice and audio_base64:
                     try:
@@ -815,7 +817,7 @@ async def handle_whatsapp_webhook(request: Request, db: Session = Depends(get_db
     if not sender_phone:
         return {"status": "ignored", "reason": "No sender identified"}
 
-    print(f"Incoming WhatsApp message from {sender_phone} | is_voice={is_voice} | text={user_text}")
+    print(f"Incoming WhatsApp message from {sender_phone} | remote_jid={remote_jid} | is_voice={is_voice} | text={user_text}")
 
     # --- 3. Process Voice Note / Voicemail (if media_url was provided e.g. Twilio/Meta) ---
     if is_voice and media_url and not user_text:
@@ -828,14 +830,16 @@ async def handle_whatsapp_webhook(request: Request, db: Session = Depends(get_db
         else:
             await send_whatsapp_message(
                 sender_phone,
-                "⚠️ Sage received your voice note, but could not download the audio file. Please ensure Twilio credentials are configured."
+                "⚠️ Sage received your voice note, but could not download the audio file. Please ensure Twilio credentials are configured.",
+                remote_jid=remote_jid
             )
             return {"status": "error", "reason": "Audio download failed"}
 
     if not user_text.strip():
         await send_whatsapp_message(
             sender_phone,
-            "👋 Hi! I received your message. You can text or send a voice note with any reminder (e.g. _'Remind me at 5 PM to check server'_) or text *briefing* to see today's updates."
+            "👋 Hi! I received your message. You can text or send a voice note with any reminder (e.g. _'Remind me at 5 PM to check server'_) or text *briefing* to see today's updates.",
+            remote_jid=remote_jid
         )
         return {"status": "ok"}
 
@@ -843,7 +847,7 @@ async def handle_whatsapp_webhook(request: Request, db: Session = Depends(get_db
     lower_input = user_text.strip().lower()
     if lower_input in ("briefing", "summary", "today", "today's work", "todays work", "/briefing"):
         briefing = generate_daily_briefing_text(db, user_name="Ragul")
-        await send_whatsapp_message(sender_phone, briefing)
+        await send_whatsapp_message(sender_phone, briefing, remote_jid=remote_jid)
         return {"status": "ok", "action": "briefing_sent"}
 
     # --- 5. Handle Special Command: 'reminders' ---
@@ -855,14 +859,14 @@ async def handle_whatsapp_webhook(request: Request, db: Session = Depends(get_db
             .all()
         )
         if not active_reminders:
-            await send_whatsapp_message(sender_phone, "✓ You have no pending reminders. Send a voice note or text to create one!")
+            await send_whatsapp_message(sender_phone, "✓ You have no pending reminders. Send a voice note or text to create one!", remote_jid=remote_jid)
         else:
             lines = ["⏰ *YOUR ACTIVE REMINDERS:*"]
             for idx, r in enumerate(active_reminders, 1):
                 time_str = r.remind_at.strftime("%b %d, %I:%M %p")
                 lines.append(f"{idx}. *{r.reminder_text}*")
                 lines.append(f"   Due: {time_str} UTC")
-            await send_whatsapp_message(sender_phone, "\n".join(lines))
+            await send_whatsapp_message(sender_phone, "\n".join(lines), remote_jid=remote_jid)
         return {"status": "ok", "action": "reminders_listed"}
 
     # --- 6. Smart NLP Intent Parsing (Reminders & Tasks) ---
@@ -889,12 +893,12 @@ async def handle_whatsapp_webhook(request: Request, db: Session = Depends(get_db
             prefix = "🎙️ Voice reminder recorded!" if is_voice else "✓ Reminder scheduled!"
             reply_msg = f"{prefix}\n\n📌 *{task_text}*\n⏰ I will ping you right here when it's time."
 
-        await send_whatsapp_message(sender_phone, reply_msg)
+        await send_whatsapp_message(sender_phone, reply_msg, remote_jid=remote_jid)
         return {"status": "ok", "action": "reminder_created", "id": saved.id if saved else None}
 
     # General query fallback response
     reply_msg = parsed.get("reply", "✓ Received! I am monitoring your emails, missed calls, and reminders.")
-    await send_whatsapp_message(sender_phone, reply_msg)
+    await send_whatsapp_message(sender_phone, reply_msg, remote_jid=remote_jid)
     return {"status": "ok", "action": "chat_reply"}
 
 
